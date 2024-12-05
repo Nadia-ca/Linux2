@@ -3,13 +3,9 @@
 #!/bin/bash
 
 
-WEBSERVICE_TO_HACK="http://10.0.0.5/compleke/bxL9yvDn"
+WEBSERVICE_TO_HACK="http://10.0.0.5/complekeiv/DaeQZSBi"
+KES="6475516334529504366275482415145716744572"
 
-
-
-# You have the following key KES with the server
-
-KES="1788279208104052375212791311701435195696"
 
 # ---------------------------------------------------------------------
 
@@ -20,6 +16,14 @@ function sanitise_b64() {
 
 }
 
+
+function desanitise_b64() {
+
+  echo ${1//%2b/+}
+
+}
+
+
 # ---------------------------------------------------------------------
 
 
@@ -29,51 +33,57 @@ function get_b64_output() {
 
 }
 
+
 # ---------------------------------------------------------------------
 
 
 function injectB() {
 
+  DATA=$(echo $1 | sed 's/<br>/,/g')    
+
+  PAYLOAD="$(echo $DATA | cut -d',' -f1)"
+
+  BPAYLOAD=$(get_b64_output "$PAYLOAD")
+
+  
+
+  echo $(sanitise_b64 "$BPAYLOAD")
+
+}
+
+
+function injectBF() {
+
   PAYLOAD=$(get_b64_output "$1")
-
-  
-
-  # ----------------------------------------------------------
-
-  # Manipulation of the payload to send to S in the first step
-
-  # ----------------------------------------------------------
-
-  
-
-  # We need to sanitise the "+" of base64 before sending it
 
   echo $(sanitise_b64 "$PAYLOAD")
 
 }
-
-# ---------------------------------------------------------------------
 
 
 function injectA() {
 
+  DATA=$(echo $1 | sed 's/<br>/,/g')    
+
+  PAYLOAD="$(echo $DATA | cut -d',' -f2)"
+
+  BPAYLOAD=$(get_b64_output "$PAYLOAD")
+
+  
+
+  echo $(sanitise_b64 "$BPAYLOAD")
+
+}
+
+
+function injectS() {
+
   PAYLOAD=$(get_b64_output "$1")
-
-  
-
-  # -----------------------------------------------------------
-
-  # Manipulation of the payload to send to A in the second step
-
-  # -----------------------------------------------------------
-
-  
-
-  # We need to sanitise the "+" of base64 before sending it
 
   echo $(sanitise_b64 "$PAYLOAD")
 
 }
+
 
 # ---------------------------------------------------------------------
 
@@ -86,118 +96,98 @@ function protocol() {
 
   echo "$step1"
 
-  step2=$(wget -q -O - "$WEBSERVICE_TO_HACK/S.php?step=2&data=$(injectB "QSxF")")
+
+  step2=$(wget -q -O - "$WEBSERVICE_TO_HACK/S.php?step=2&data=$(injectS "QSxF")")
 
   echo "$step2"
 
-  step3=$(wget -q -O - "$WEBSERVICE_TO_HACK/A.php?step=3&data=$(injectA "$step2")")
+
+  # Extract S -> B and S -> A from step2
+
+  DATA=$(echo "$step2" | sed 's/<br>/,/g')
+
+  S_B_MESSAGE=$(echo "$DATA" | cut -d',' -f1)
+
+  S_A_MESSAGE=$(echo "$DATA" | cut -d',' -f2)
+
+
+  # Extract base64 payload from S -> B
+
+  S_B_PAYLOAD=$(get_b64_output "$S_B_MESSAGE")
+
+  S_B_PAYLOAD=$(desanitise_b64 "$S_B_PAYLOAD")
+
+
+  # Decrypt S -> B using KES
+
+  DECRYPTED_KEY=$(php decrypt.php "$S_B_PAYLOAD" "$KES")
+
+
+  if [ -z "$DECRYPTED_KEY" ]; then
+
+    echo "Failed to decrypt S -> B message."
+
+    exit 1
+
+  fi
+
+
+  echo "Decrypted S -> B: $DECRYPTED_KEY"
+
+
+  # Continue protocol execution
+
+  URL="$WEBSERVICE_TO_HACK/B.php?step=3&data=$(injectB "$step2")"
+
+  step3=$(wget -q -O - --keep-session-cookies --save-cookies cookies.txt $URL)
 
   echo "$step3"
 
-  
 
-  # Process the output of A -> B (step 3)
+  URL="$WEBSERVICE_TO_HACK/A.php?step=4&data=$(injectA "$step2")"
 
-  process_step3 "$step3"
+  step4=$(wget -q -O - $URL)
 
-  
-
-  printf "\n$(wget -q -O - "$WEBSERVICE_TO_HACK/B.php?step=4&data=$(injectB "$step3")")\n"
-
-}
-
-# ---------------------------------------------------------------------
+  echo "$step4"
 
 
-function process_step3() {
+  # Extract A -> B message from step4
 
-  step3_output="$1"
+  A_B_MESSAGE=$(echo "$step4" | grep "A -> B:")
 
-  
 
-  # Extract the base64-encoded payload from step3
+  # Extract base64 payload from A -> B
 
-  payload=$(get_b64_output "$step3_output" | tr -d '\r\n')
+  A_B_PAYLOAD=$(get_b64_output "$A_B_MESSAGE")
 
-  
+  A_B_PAYLOAD=$(desanitise_b64 "$A_B_PAYLOAD")
 
-  # Decode the payload
 
-  decoded_payload=$(echo "$payload" | base64 -d)
+  # Decrypt A -> B using the decrypted key from S -> B
 
-  
+  PLAINTEXT=$(php decrypt.php "$A_B_PAYLOAD" "$DECRYPTED_KEY")
 
-  # Split the decoded payload into m1 and m2
 
-  IFS=',' read -r m1 m2 <<< "$decoded_payload"
+  if [ -z "$PLAINTEXT" ]; then
 
-  
+    echo "Failed to decrypt A -> B message."
 
-  # Decode m1 and m2 from base64
+    exit 1
 
-  decoded_m1=$(echo "$m1" | base64 -d)
+  fi
 
-  decoded_m2=$(echo "$m2" | base64 -d)
 
-  
+  echo "Decrypted A -> B: $PLAINTEXT"
 
-  # Create temporary files to handle binary data
 
-  tmp_m1_enc=$(mktemp)
+  # Final step
 
-  tmp_m2_enc=$(mktemp)
+  URL="$WEBSERVICE_TO_HACK/B.php?step=5&data=$(injectBF "$step4")"
 
-  tmp_m1_dec=$(mktemp)
-
-  tmp_m2_dec=$(mktemp)
-
-  
-
-  # Write decoded_m1 and decoded_m2 to temporary files
-
-  echo -n "$decoded_m1" > "$tmp_m1_enc"
-
-  echo -n "$decoded_m2" > "$tmp_m2_enc"
-
-  
-
-  # Decrypt m1 with KES using PBKDF2
-
-  openssl enc -d -aes-256-cbc -pbkdf2 -in "$tmp_m1_enc" -out "$tmp_m1_dec" -pass pass:"$KES" 2>/dev/null
-
-  
-
-  # Read the decrypted key from m1
-
-  key_m1=$(cat "$tmp_m1_dec")
-
-  
-
-  # Decrypt m2 with the key obtained from decrypted m1
-
-  openssl enc -d -aes-256-cbc -pbkdf2 -in "$tmp_m2_enc" -out "$tmp_m2_dec" -pass pass:"$key_m1" 2>/dev/null
-
-  
-
-  # Read the final decrypted message from m2
-
-  decrypted_m2=$(cat "$tmp_m2_dec")
-
-  
-
-  # Output the decrypted messages
-
-  echo "Decrypted m1: $key_m1"
-
-  echo "Decrypted m2: $decrypted_m2"
-
-  
-
-  # Clean up temporary files
-
-  rm -f "$tmp_m1_enc" "$tmp_m2_enc" "$tmp_m1_dec" "$tmp_m2_dec"
+  printf "\n$(wget -q -O -  --load-cookies cookies.txt $URL)\n"
 
 }
+
 
 # ---------------------------------------------------------------------
 
@@ -205,3 +195,6 @@ function process_step3() {
 # Run the protocol
 
 protocol
+
+
+
